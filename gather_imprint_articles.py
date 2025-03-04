@@ -25,7 +25,7 @@ def soup_article(url, headers, cache_html=True, add_wait=False):
         sleep(randint(1, 5))
     
     url_name = url.split('/')[4]
-    out_file_name = "articles/" + url_name + ".html"
+    out_file_name = "data/articles/" + url_name + ".html"
     url_html = ''
     
     if cache_html and os.path.exists(out_file_name):
@@ -55,7 +55,7 @@ def soup_article(url, headers, cache_html=True, add_wait=False):
     
     
 # Function to extract article information from link
-def extract_article_info(url, url_soup=None, cache_html=False):
+def extract_article_info(url, url_soup=None, headers=None, cache_html=False):
     """
     Extracts article text and information from url.
     Returns article information as list.
@@ -80,7 +80,7 @@ def extract_article_info(url, url_soup=None, cache_html=False):
             
             if cache_html:
                 url_name = url.split('/')[4]
-                out_file_name = "articles/" + url_name + ".html"
+                out_file_name = "data/articles/" + url_name + ".html"
                 with open(out_file_name, "w", encoding='utf-8') as file:
                     file.write(url_html.decode("utf-8"))
                     
@@ -112,7 +112,10 @@ def extract_article_info(url, url_soup=None, cache_html=False):
         print("Error: Tags", e, url)
         
     try:
-        article_text = '\n'.join([p.get_text() for p in url_soup.find(class_='article-content').find_all('p')])
+        content_soup = url_soup.find(class_='article-content')
+        for caption in content_soup.find_all(class_='wp-caption-text'):
+            caption.decompose()
+        article_text = content_soup.get_text()
     except Exception as e:
         print("Error: Text", e, url)
     
@@ -193,13 +196,13 @@ def main():
     Write out each article link.
     """
     # If hasn't been run already, then load all article links from child welfare archives
-    if not os.path.exists("imprint_child-welfare_article_links.txt"):
+    if not os.path.exists("data/imprint_child-welfare_article_links.txt"):
         browser = webdriver.Chrome()
         imprint_url = 'https://imprintnews.org/topic/child-welfare-2'
 
         n_articles, articles, soup = load_all_articles(browser, imprint_url, load_more=True)
         
-        with open("imprint_child-welfare_article_links.txt", "w") as file:
+        with open("data/imprint_child-welfare_article_links.txt", "w") as file:
             for article in articles:
                 file.write(article + '\n')
             
@@ -207,18 +210,18 @@ def main():
     
     # Load text file where article links are and download each article into dataframe
     print("Loading article links...")
-    with open("imprint_child-welfare_article_links.txt", "r") as file:
+    with open("data/imprint_child-welfare_article_links.txt", "r") as file:
         article_links = file.readlines()
         
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.79 Safari/537.36'}
 
     article_soups = [soup_article(link.strip('\n'), headers) for link in article_links]
-    article_list_of_lists = [extract_article_info(url, soup) for url,soup in article_soups]
+    article_list_of_lists = [extract_article_info(url, soup, headers=headers) for url,soup in article_soups]
     article_columns = ["url","title","date","author","tags","type","text"]
     
     print("Creating dataframe...")
     article_df = pd.DataFrame(article_list_of_lists, columns=article_columns)
-    article_df.to_csv('imprint_articles_df.csv')
+    article_df.to_csv('data/imprint_articles_df.csv')
     n_rows = len(article_df)
     print("Saved dataframe with", str(n_rows), "rows. Done.")
 
