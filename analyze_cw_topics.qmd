@@ -1,0 +1,516 @@
+---
+title: "CSSS594: Final Project"
+author: "Lucas Gerber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output-ext: html
+embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+#| echo: false
+
+# Set options
+options(scipen = 9)
+
+# Load needed libraries
+library(tidyverse)
+library(tidytext)
+library(SnowballC)
+library(topicmodels)
+library(ggplot2)
+library(gt)
+
+# Seed for topic model
+SEED <- 03162025
+
+```
+
+# Load Data.
+
+```{r load_data}
+
+# Load data and filter out non-text and a few outlier documents
+cw_articles <-
+  read_csv(
+    "../data/imprint_articles_df.csv",
+    col_types = list(
+      ...1 = col_integer(),
+      url = col_character(),
+      title = col_character(),
+      date = col_datetime(format = "%m/%d/%Y %H:%M %p"),
+      author = col_character(),
+      tags = col_character(),
+      type = col_character(),
+      text = col_character()
+    )
+  ) |>
+  rename(
+    article_id = ...1
+  ) |>
+  mutate(
+    year = year(date),
+    len_document = str_length(text)
+  ) |>
+  filter(
+    (type == "opinion"), #not in c('podcast', 'multimedia')
+    !is.na(text) #, !(title %in% c('Five Decades of Child Welfare, Juvenile Justice and Party Platforms','ARCHIVED: Coronavirus, Child Welfare and Juvenile Justice, A Running Thread'))
+  )
+
+# Convert to paragraphs, based on html
+cw_articles_par <-
+  cw_articles |>
+  unnest_tokens(
+    paragraph,
+    text,
+    token = 'regex',
+    to_lower = FALSE,
+    pattern = '\n'
+  ) |>
+  mutate(
+    len_paragraph = str_length(paragraph)
+  )
+
+# Identify any duplicate paragraphs
+cw_articles_par_dup <-
+  cw_articles_par |>
+  group_by(paragraph) |>
+  summarize(
+    nduplicate = n()
+  ) |>
+  filter(
+    nduplicate > 1
+  )
+
+# Remove duplicate paragraphs and author headlines
+cw_articles_par <-
+  cw_articles_par |>
+  anti_join(
+    cw_articles_par_dup
+  ) |>
+  filter(
+    !(paragraph == paste0("By ", author))
+  ) |>
+  mutate(
+    paragraph_id = row_number()
+  )
+
+head(cw_articles_par)
+
+# Clean up memory
+rm(cw_articles_par_dup)
+
+```
+
+# Explore Data.
+
+```{r describe_data}
+
+# Count paragraphs by article
+cw_articles_parcount <-
+  cw_articles_par |>
+  group_by(title) |>
+  count() |>
+  arrange((desc(n)))
+
+cw_articles_parcountmean <- cw_articles_parcount |> pull(n) |> mean()
+cw_articles_total <- nrow(cw_articles_parcount)
+cw_articles_par_total <- nrow(cw_articles_par)
+
+# Count articles by type
+cw_articles_type <-
+  cw_articles |>
+  group_by(type) |>
+  count()
+
+# Count articles by year
+cw_articles_year <-
+  cw_articles |>
+  group_by(year) |>
+  count()
+
+cw_articles_lenmean <- cw_articles |> pull(len_document) |> mean()
+
+cw_articles_type
+cw_articles_year
+
+```
+
+Mean number of paragraphs per article: `r cw_articles_parcountmean`.
+Mean number of characters per article: `r cw_articles_lenmean`.
+Total articles included: `r cw_articles_total`.
+Total paragraphs included: `r cw_articles_par_total`.
+
+# Pre-process.
+
+```{r pre_process_data}
+
+# Final bigram and trigram list to add
+ngram_list = c(
+  "in foster care",
+  "child welfare system",
+  "foster care system",
+  "children and families",
+  "new york city",
+  "abuse and neglect",
+  "the family first prevention services act",
+  "former foster youth",
+  "child welfare agencies",
+  "abuse or neglect",
+  "foster care",
+  "child welfare",
+  "foster youth",
+  "los angeles",
+  "young people",
+  "child abuse"
+)
+
+ngram_list_new <- stringi::stri_replace_all_regex(ngram_list, "\\s+", "_")
+
+# Change to tidy format
+cw_articles_par_tidy <-
+  cw_articles_par |>
+  mutate(
+    paragraph = stringi::stri_replace_all_regex(tolower(paragraph), paste0("\\b", ngram_list, "\\b"), ngram_list_new, vectorize_all = FALSE)
+  ) |>
+  unnest_tokens(word, paragraph)
+
+# Remove stop words, numbers, words less than 2 characters, stem with Porter's stemmer
+cw_articles_par_tidy_processed <-
+  cw_articles_par_tidy |>
+  anti_join(stop_words) |>
+  mutate(word = str_extract(word, "[a-z'_]+")) |>
+  filter(!is.na(word), str_length(word) > 2) |>
+  mutate(
+    word = case_when(
+      grepl("_", word, fixed = TRUE) ~ word,
+      .default = wordStem(word)
+    )
+  )
+
+# Add TF-IDF for use later
+cw_articles_par_tidy_processed_words <-
+  cw_articles_par_tidy_processed |>
+  count(paragraph_id, word) |>
+  bind_tf_idf(word, paragraph_id, n)
+  #filter(tf_idf >= .1, tf_idf <= 3) can try this filter, also lemmatization, and covariates
+  
+# Convert to Document-Term Matrix
+cw_articles_par_dtm <-
+  cw_articles_par_tidy_processed_words |>
+  cast_dtm(paragraph_id, word, n)
+
+```
+
+## Top words after pre-processing
+
+```{r show_topwords}
+
+# Show top words
+cw_articles_topwords <-
+  cw_articles_par_tidy_processed |>
+  count(word, sort = TRUE) |>
+  head(20) |>
+  gt() |>
+  tab_header(
+    title = "Top Tokens after Preprocessing"
+  )
+
+cw_articles_topwords
+
+# Show top and bottom words by idf
+cw_articles_idf <-
+  cw_articles_par_tidy_processed_words |>
+  select(word, idf) |>
+  distinct()
+
+cw_articles_topidf <-
+  cw_articles_idf |>
+  arrange(desc(idf)) |>
+  head(20) |>
+  gt() |>
+  tab_header(
+    title = "Top IDF Token after Preprocessing"
+  )
+
+cw_articles_bottomidf <-
+  cw_articles_idf |>
+  arrange(idf) |>
+  head(20) |>
+  gt() |>
+  tab_header(
+    title = "Bottom IDF Token after Preprocessing"
+  )
+
+cw_articles_topidf
+cw_articles_bottomidf
+
+# Vocabulary size and total tokens
+cw_articles_vocab_size <-
+  cw_articles_par_tidy_processed |>
+  select(word) |>
+  n_distinct()
+
+cw_articles_tokens_final <-
+  cw_articles_par_tidy_processed |>
+  nrow()
+
+```
+
+Vocabulary size is `r cw_articles_vocab_size`.
+Total tokens is `r cw_articles_tokens_final`.
+
+# Run LDA with 20 topics.
+
+```{r run_lda_k20}
+
+# Run LDA with 20 topics
+if(file.exists("../output/k20/model_lda_k20.RData")){
+  load("../output/k20/model_lda_k20.RData")
+} else {
+  model_lda_k20 <- LDA(cw_articles_par_dtm, k = 20, control = list(seed = SEED))
+  save(model_lda_k20, file = "../output/k20/model_lda_k20.RData")
+}
+
+```
+
+## Plot of top terms for each topic
+
+```{r plot_topterms_lda_k20}
+
+# Grab top terms
+lda_k20_topterms <-
+  tidy(model_lda_k20, matrix = "beta") |>
+  group_by(topic) |>
+  slice_max(n = 10, order_by = beta) |> 
+  ungroup() |>
+  arrange(topic, -beta)
+
+# Plot top terms for each topic
+lda_k20_topterms_plot <-
+  lda_k20_topterms |>
+  mutate(term = reorder_within(term, beta, topic)) |>
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, ncol = 2, scales = "free") +
+  scale_y_reordered()
+
+ggsave("../output/k20/lda_k20_topterms_plot.png", lda_k20_topterms_plot, width = 8.5, height = 25, units = c("in"))
+
+```
+
+```{r grab_topdocs_lda_k20}
+
+# Grab document probabilities
+lda_k20_topdocs <-
+  tidy(model_lda_k20, matrix = "gamma") |>
+  group_by(topic) |>
+  slice_max(n = 10, order_by = gamma) |> 
+  ungroup() |>
+  mutate(paragraph_id = as.integer(document)) |>
+  arrange(topic, -gamma) |>
+  left_join(cw_articles_par, by = "paragraph_id")
+
+lda_k20_topdocs |> write_csv("../output/k20/lda_k20_topdocs.csv")
+
+lda_k20_topdocs_toread <-
+  lda_k20_topdocs |>
+  select(
+    topic, gamma, paragraph
+  )
+
+lda_k20_topdocs_toread |> write_csv("../output/k20/lda_k20_topdocs_toread.csv")
+
+```
+
+```{r grab_topassign_lda_k20}
+
+# Grab top assigned topic for each document
+lda_k20_topassign <-
+  tidy(model_lda_k20, matrix = "gamma") |>
+  group_by(document) |>
+  slice_max(n = 1, order_by = gamma)
+
+lda_k20_topassign |> write_csv("../output/k20/lda_k20_topassign.csv")
+
+```
+
+```{r output_lda_k20}
+
+# Pull out top two docs for output
+lda_k20_top2docs <-
+  lda_k20_topdocs |>
+  group_by(topic) |>
+  slice_max(n = 2, order_by = gamma) |> 
+  mutate(rank = row_number()) |>
+  ungroup() |>
+  select(c(topic, rank, paragraph)) |>
+  pivot_wider(names_from = rank, values_from = paragraph)
+
+# Count probability of top assignment for ordering
+lda_k20_topassign_final <-
+  lda_k20_topassign |> 
+  ungroup() |>
+  count(topic) |>
+  arrange(desc(n))
+
+# Output for topics
+topics_output <-
+  lda_k20_topassign_final |>
+  left_join(
+    lda_k20_topterms |> summarize(terms = paste0(term, collapse = ", "), .by = topic),
+    by = "topic") |>
+  left_join(
+    lda_k20_top2docs,
+    by = "topic"
+  )
+
+topics_output |> write_csv("../output/k20/lda_k20_output.csv")
+
+```
+
+# Run LDA with 30 topics.
+
+```{r run_lda_k30}
+
+# Run LDA with 30 topics
+if(file.exists("../output/k30/model_lda_k30.RData")){
+  load("../output/k30/model_lda_k30.RData")
+} else {
+  model_lda_k30 <- LDA(cw_articles_par_dtm, k = 30, control = list(seed = SEED))
+  save(model_lda_k30, file = "../output/k30/model_lda_k30.RData")
+}
+
+```
+
+## Plot of top terms for each topic
+
+```{r plot_topterms_lda_k30}
+
+# Grab top terms
+lda_k30_topterms <-
+  tidy(model_lda_k30, matrix = "beta") |>
+  group_by(topic) |>
+  slice_max(n = 10, order_by = beta) |> 
+  ungroup() |>
+  arrange(topic, -beta)
+
+# Plot top terms for each topic
+lda_k30_topterms_plot <-
+  lda_k30_topterms |>
+  mutate(term = reorder_within(term, beta, topic)) |>
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, ncol = 2, scales = "free") +
+  scale_y_reordered()
+
+ggsave("../output/k30/lda_k30_topterms_plot.png", lda_k30_topterms_plot, width = 8.5, height = 25, units = c("in"))
+
+# Plot top terms of labeled frames
+if(file.exists("../output/k30/lda_k30_topics.csv")){
+  lda_k30_topics <-
+    read_csv(
+    "../output/k30/lda_k30_topics.csv",
+    col_types = list(
+      topic = col_integer(),
+      label = col_character()
+    )
+  )
+  
+  lda_k30_topterms_labeled_plot <-
+    lda_k30_topterms |>
+    left_join(lda_k30_topics) |>
+    filter(!is.na(label)) |>
+    mutate(term = reorder_within(term, beta, topic)) |>
+    ggplot(aes(beta, term)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ label, ncol = 2, scales = "free") +
+    scale_y_reordered()
+  
+  ggsave("../output/k30/lda_k30_topterms_labeled_plot.png", lda_k30_topterms_labeled_plot, width = 8.5, height = 11, units = c("in"))
+}
+
+```
+
+```{r grab_topdocs_lda_k30}
+
+# Grab document probabilities
+lda_k30_topdocs <-
+  tidy(model_lda_k30, matrix = "gamma") |>
+  group_by(topic) |>
+  slice_max(n = 10, order_by = gamma) |> 
+  ungroup() |>
+  mutate(paragraph_id = as.integer(document)) |>
+  arrange(topic, -gamma) |>
+  left_join(cw_articles_par, by = "paragraph_id")
+
+lda_k30_topdocs |> write_csv("../output/k30/lda_k30_topdocs.csv")
+
+lda_k30_topdocs_toread <-
+  lda_k30_topdocs |>
+  select(
+    topic, gamma, paragraph
+  )
+
+lda_k30_topdocs_toread |> write_csv("../output/k30/lda_k30_topdocs_toread.csv")
+
+```
+
+```{r grab_topassign_lda_k30}
+
+# Grab top assigned topic for each document
+lda_k30_topassign <-
+  tidy(model_lda_k30, matrix = "gamma") |>
+  group_by(document) |>
+  slice_max(n = 1, order_by = gamma)
+
+lda_k30_topassign |> write_csv("../output/k30/lda_k30_topassign.csv")
+
+```
+
+```{r output_lda_k30}
+
+# Pull out top two docs for output
+lda_k30_top2docs <-
+  lda_k30_topdocs |>
+  group_by(topic) |>
+  slice_max(n = 2, order_by = gamma) |> 
+  mutate(rank = row_number()) |>
+  ungroup() |>
+  select(c(topic, rank, paragraph)) |>
+  pivot_wider(names_from = rank, values_from = paragraph)
+
+# Count probability of top assignment for ordering
+lda_k30_topassign_final <-
+  lda_k30_topassign |> 
+  ungroup() |>
+  count(topic) |>
+  arrange(desc(n))
+
+# Output for topics
+topics_output <-
+  lda_k30_topassign_final |>
+  left_join(
+    lda_k30_topterms |> summarize(terms = paste0(term, collapse = ", "), .by = topic),
+    by = "topic") |>
+  left_join(
+    lda_k30_top2docs,
+    by = "topic"
+  )
+
+topics_output |> write_csv("../output/k30/lda_k30_output.csv")
+
+```
+
+{{< pagebreak >}}
+
+# Appendix: R Code
+
+```{r ref.label=knitr::all_labels()}
+#| echo: true
+#| eval: false
+```
