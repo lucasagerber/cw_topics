@@ -199,10 +199,15 @@ cw_articles_par_tidy_processed_words <-
   bind_tf_idf(word, paragraph_id, n)
   #filter(tf_idf >= .1, tf_idf <= 3) can try this filter, also lemmatization, and covariates
   
-# Convert to Document-Term Matrix
+# Convert to Document-Term Matrix (topicmodels)
 cw_articles_par_dtm <-
   cw_articles_par_tidy_processed_words |>
   cast_dtm(paragraph_id, word, n)
+
+# Convert to Document-Term Matrix (stm)
+cw_articles_par_dfm <-
+  cw_articles_par_tidy_processed_words |>
+  cast_dfm(paragraph_id, word, n)
 
 ```
 
@@ -503,6 +508,24 @@ topics_output <-
   )
 
 topics_output |> write_csv("../output/k30/lda_k30_output.csv")
+
+```
+
+# Run STM with 0 topics to compute number of topics using Lee and Mimno 2014 method.
+
+```{r run_stm_k0}
+
+# Run stm with k=0
+stm(cw_articles_par_dfm, K = 0, init.type = "Spectral")
+
+```
+
+# Run STM with 87 topics based on Lee and Mimno 2014 method.
+
+```{r run_stm_k87}
+
+# Run stm with k=87
+stm(cw_articles_par_dfm, K = 87, init.type = "Spectral")
 
 ```
 
